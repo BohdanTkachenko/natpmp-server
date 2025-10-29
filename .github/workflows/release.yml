@@ -1,0 +1,237 @@
+name: Build and Release NAT-PMP Server Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0, v2.1.3, etc.
+  workflow_dispatch:  # Allow manual trigger
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux targets
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: natpmp-server-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: natpmp-server-linux-arm64
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            name: natpmp-server-linux-armv7
+          
+          # macOS targets
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: natpmp-server-macos-amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: natpmp-server-macos-arm64
+            
+          # Windows targets
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: natpmp-server-windows-amd64.exe
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Install cross-compilation tools (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+        
+        # Install cross-compilation tools for ARM
+        if [[ "${{ matrix.target }}" == *"aarch64"* ]]; then
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+        fi
+        
+        if [[ "${{ matrix.target }}" == *"armv7"* ]]; then
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+          echo "CC_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+        fi
+
+    - name: Install libnatpmp (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        # Build libnatpmp from source for better cross-compilation support
+        wget http://download.tuxfamily.org/libnatpmp/libnatpmp-20230423.tar.gz
+        tar -xzf libnatpmp-20230423.tar.gz
+        cd libnatpmp-20230423
+        make
+        sudo make install
+        sudo ldconfig
+
+    - name: Install libnatpmp (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install libnatpmp
+
+    - name: Install libnatpmp (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        # For Windows, we'll need to handle libnatpmp differently
+        # This is a placeholder - Windows NAT-PMP support might need additional work
+        Write-Host "Windows build - libnatpmp handling needed"
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build binary
+      run: |
+        cargo build --release --target ${{ matrix.target }}
+
+    - name: Strip binary (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: |
+        if command -v strip > /dev/null; then
+          strip target/${{ matrix.target }}/release/natpmp-server
+        fi
+
+    - name: Prepare binary
+      shell: bash
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          cp target/${{ matrix.target }}/release/natpmp-server.exe ${{ matrix.name }}
+        else
+          cp target/${{ matrix.target }}/release/natpmp-server ${{ matrix.name }}
+        fi
+
+    - name: Generate SHA256 checksum
+      shell: bash
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          certutil -hashfile ${{ matrix.name }} SHA256 > ${{ matrix.name }}.sha256
+        else
+          sha256sum ${{ matrix.name }} > ${{ matrix.name }}.sha256
+        fi
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.name }}
+        path: |
+          ${{ matrix.name }}*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Prepare release assets
+      run: |
+        mkdir -p release-assets
+        find artifacts -type f -exec cp {} release-assets/ \;
+        ls -la release-assets/
+
+    - name: Get tag name
+      id: tag
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.tag.outputs.tag }}
+        name: NAT-PMP Server ${{ steps.tag.outputs.tag }}
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        files: release-assets/*
+        body: |
+          ## NAT-PMP HTTP Server ${{ steps.tag.outputs.tag }}
+          
+          ### Binary Downloads
+          
+          **Linux:**
+          - `natpmp-server-linux-amd64` - x86_64 Linux (most servers)
+          - `natpmp-server-linux-arm64` - ARM64 Linux (AWS Graviton, Apple Silicon Linux VMs)
+          - `natpmp-server-linux-armv7` - ARMv7 Linux (Raspberry Pi, older ARM devices)
+          
+          **macOS:**
+          - `natpmp-server-macos-amd64` - Intel Macs
+          - `natpmp-server-macos-arm64` - Apple Silicon Macs (M1/M2/M3)
+          
+          **Windows:**
+          - `natpmp-server-windows-amd64.exe` - x86_64 Windows
+          
+          ### Usage
+          
+          ```bash
+          # Download and run (Linux example)
+          wget https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/natpmp-server-linux-amd64
+          chmod +x natpmp-server-linux-amd64
+          
+          # Run with authentication
+          NATPMP_TOKEN=your-secret-token ./natpmp-server-linux-amd64 --gateway=10.2.0.1
+          ```
+          
+          ### Containers
+          
+          Multi-architecture container images are also available:
+          
+          ```bash
+          docker run --cap-add NET_ADMIN --cap-add NET_RAW \
+            --network host \
+            -e NATPMP_GATEWAY=10.2.0.1 \
+            -e NATPMP_TOKEN=your-secret \
+            ghcr.io/${{ github.repository_owner }}/natpmp-server:${{ steps.tag.outputs.tag }}
+          ```
+          
+          ### Verification
+          
+          All binaries include SHA256 checksums for verification:
+          
+          ```bash
+          # Verify download integrity
+          sha256sum -c natpmp-server-linux-amd64.sha256
+          ```
+          
+          🔒 All binaries are built from source using GitHub Actions for full transparency and security.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

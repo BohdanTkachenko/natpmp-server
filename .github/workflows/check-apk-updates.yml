@@ -1,0 +1,186 @@
+name: Check APK Package Updates
+
+on:
+  schedule:
+    # Check for APK updates weekly on Wednesdays at 4:00 AM UTC
+    - cron: '0 4 * * 3'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-apk-updates:
+    name: Check APK Package Updates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Check for APK package updates
+      id: check-updates
+      run: |
+        # Extract versions from Dockerfile
+        RUST_VERSION=$(grep "ARG RUST_VERSION=" Dockerfile | head -1 | sed 's/ARG RUST_VERSION=//')
+        ALPINE_VERSION=$(grep "ARG ALPINE_VERSION=" Dockerfile | head -1 | sed 's/ARG ALPINE_VERSION=//')
+        echo "Detected Rust version: $RUST_VERSION"
+        echo "Detected Alpine version: $ALPINE_VERSION"
+        
+        echo "Checking for APK package updates in Alpine $ALPINE_VERSION..."
+        
+        # Extract current versions from Dockerfile
+        CURRENT_MUSL=$(grep "musl-dev=" Dockerfile | sed 's/.*musl-dev=\([^ ]*\).*/\1/')
+        CURRENT_LIBNATPMP=$(grep "libnatpmp=" Dockerfile | sed 's/.*libnatpmp=\([^ ]*\).*/\1/' | head -1)
+        CURRENT_CA_CERTS=$(grep "ca-certificates=" Dockerfile | sed 's/.*ca-certificates=\([^ ]*\).*/\1/')
+        
+        echo "Current versions:"
+        echo "  musl-dev: $CURRENT_MUSL"
+        echo "  libnatpmp: $CURRENT_LIBNATPMP"  
+        echo "  ca-certificates: $CURRENT_CA_CERTS"
+        
+        # Check latest versions in current Alpine version
+        echo "Checking latest versions in Alpine $ALPINE_VERSION..."
+        
+        docker run --rm alpine:$ALPINE_VERSION sh -c "
+          apk update >/dev/null 2>&1
+          echo 'LATEST_MUSL='$(apk list musl-dev 2>/dev/null | grep -o 'musl-dev-[^ ]*' | sed 's/musl-dev-//')
+          echo 'LATEST_LIBNATPMP='$(apk list libnatpmp 2>/dev/null | grep -o 'libnatpmp-[^ ]*' | sed 's/libnatpmp-//')
+          echo 'LATEST_CA_CERTS='$(apk list ca-certificates 2>/dev/null | grep -o 'ca-certificates-[^ ]*' | sed 's/ca-certificates-//')
+        " > latest_versions.env
+        
+        source latest_versions.env
+        
+        echo "Latest versions:"
+        echo "  musl-dev: $LATEST_MUSL"
+        echo "  libnatpmp: $LATEST_LIBNATPMP"
+        echo "  ca-certificates: $LATEST_CA_CERTS"
+        
+        # Check for updates
+        UPDATES_AVAILABLE=false
+        UPDATE_SUMMARY=""
+        
+        if [ "$CURRENT_MUSL" != "$LATEST_MUSL" ]; then
+          echo "musl-dev update available: $CURRENT_MUSL → $LATEST_MUSL"
+          UPDATE_SUMMARY+="\n- **musl-dev**: $CURRENT_MUSL → $LATEST_MUSL"
+          UPDATES_AVAILABLE=true
+        fi
+        
+        if [ "$CURRENT_LIBNATPMP" != "$LATEST_LIBNATPMP" ]; then
+          echo "libnatpmp update available: $CURRENT_LIBNATPMP → $LATEST_LIBNATPMP"  
+          UPDATE_SUMMARY+="\n- **libnatpmp**: $CURRENT_LIBNATPMP → $LATEST_LIBNATPMP"
+          UPDATES_AVAILABLE=true
+        fi
+        
+        if [ "$CURRENT_CA_CERTS" != "$LATEST_CA_CERTS" ]; then
+          echo "ca-certificates update available: $CURRENT_CA_CERTS → $LATEST_CA_CERTS"
+          UPDATE_SUMMARY+="\n- **ca-certificates**: $CURRENT_CA_CERTS → $LATEST_CA_CERTS"
+          UPDATES_AVAILABLE=true
+        fi
+        
+        echo "UPDATES_AVAILABLE=$UPDATES_AVAILABLE" >> $GITHUB_ENV
+        echo "UPDATE_SUMMARY<<EOF" >> $GITHUB_ENV
+        echo -e "$UPDATE_SUMMARY" >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
+        
+        # Save versions for issue creation
+        echo "RUST_VERSION=$RUST_VERSION" >> $GITHUB_ENV
+        echo "CURRENT_MUSL=$CURRENT_MUSL" >> $GITHUB_ENV
+        echo "CURRENT_LIBNATPMP=$CURRENT_LIBNATPMP" >> $GITHUB_ENV
+        echo "CURRENT_CA_CERTS=$CURRENT_CA_CERTS" >> $GITHUB_ENV
+        echo "ALPINE_VERSION=$ALPINE_VERSION" >> $GITHUB_ENV
+        echo "LATEST_MUSL=$LATEST_MUSL" >> $GITHUB_ENV
+        echo "LATEST_LIBNATPMP=$LATEST_LIBNATPMP" >> $GITHUB_ENV
+        echo "LATEST_CA_CERTS=$LATEST_CA_CERTS" >> $GITHUB_ENV
+
+    - name: Create issue for APK updates
+      if: env.UPDATES_AVAILABLE == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const issueTitle = `📦 APK Package Updates Available - ${new Date().toISOString().split('T')[0]}`;
+          
+          const issueBody = `# 📦 APK Package Updates Available
+          
+          The following APK packages have updates available in Alpine ${process.env.ALPINE_VERSION}:
+          
+          ${process.env.UPDATE_SUMMARY}
+          
+          ## 🛠️ How to Update
+          
+          Update the pinned versions in \`Dockerfile\`:
+          
+          \`\`\`dockerfile
+          # Build stage
+          RUN apk add --no-cache \\
+              musl-dev=${process.env.LATEST_MUSL} \\
+              libnatpmp-dev=${process.env.LATEST_LIBNATPMP}
+          
+          # Runtime stage  
+          RUN apk add --no-cache \\
+              libnatpmp=${process.env.LATEST_LIBNATPMP} \\
+              ca-certificates=${process.env.LATEST_CA_CERTS}
+          \`\`\`
+          
+          ## 🔍 What to Check
+          
+          - [ ] Test that the container builds successfully
+          - [ ] Verify the NAT-PMP server still works correctly
+          - [ ] Check for any breaking changes in package updates
+          - [ ] Update version and create new release if needed
+          
+          ## 📋 Package Details
+          
+          | Package | Current | Latest | Type |
+          |---------|---------|--------|------|
+          | musl-dev | ${process.env.CURRENT_MUSL} | ${process.env.LATEST_MUSL} | Build dependency |
+          | libnatpmp | ${process.env.CURRENT_LIBNATPMP} | ${process.env.LATEST_LIBNATPMP} | Runtime dependency |
+          | ca-certificates | ${process.env.CURRENT_CA_CERTS} | ${process.env.LATEST_CA_CERTS} | Runtime dependency |
+          
+          ---
+          
+          This issue was automatically created by the APK update checker workflow.
+          `;
+          
+          // Check if there's already an open APK update issue
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            labels: 'apk-updates,dependencies',
+            state: 'open'
+          });
+          
+          if (issues.length === 0) {
+            // Create new issue
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: issueBody,
+              labels: ['apk-updates', 'dependencies', 'maintenance']
+            });
+          } else {
+            // Update existing issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issues[0].number,
+              body: `## Updated APK Check Results - ${new Date().toISOString()}\n\n${issueBody}`
+            });
+          }
+
+    - name: Generate summary
+      if: always()
+      run: |
+        echo "## 📦 APK Package Update Check" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "$UPDATES_AVAILABLE" = "true" ]; then
+          echo "### ✅ Updates Available" >> $GITHUB_STEP_SUMMARY
+          echo "$UPDATE_SUMMARY" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📝 An issue has been created with update instructions." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ✅ All Packages Up to Date" >> $GITHUB_STEP_SUMMARY
+          echo "No APK package updates available in Alpine 3.21." >> $GITHUB_STEP_SUMMARY
+        fi
