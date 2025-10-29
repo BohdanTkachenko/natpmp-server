@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or commit SHA)'
+        required: false
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or commit SHA)'
+        required: false
+        type: string
+
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust.yml'
+
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: natpmp-server-linux-amd64
+
+    steps:
+    - name: Install libnatpmp
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libnatpmp1t64
+
+    - name: Checkout repository
+      uses: actions/checkout@v5
+      with:
+        ref: ${{ inputs.ref || github.ref }}
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build binary
+      run: |
+        cargo build --verbose --release --target ${{ matrix.target }}
+        strip target/${{ matrix.target }}/release/natpmp-server
+        cp target/${{ matrix.target }}/release/natpmp-server ${{ matrix.name }}
+        sha256sum ${{ matrix.name }} > ${{ matrix.name }}.sha256
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v5
+      with:
+        name: ${{ matrix.name }}
+        path: |
+          ${{ matrix.name }}*
