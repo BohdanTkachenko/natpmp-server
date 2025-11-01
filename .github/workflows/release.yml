@@ -155,11 +155,11 @@ jobs:
       issues: write
     uses: ./.github/workflows/docker.yml
     with:
-      ref: v${{ needs.version-bump.outputs.version }}
+      ref: main
 
   release:
     name: Create Release
-    needs: [version-bump, rust, docker]
+    needs: [version-bump, rust, docker, create-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: write
