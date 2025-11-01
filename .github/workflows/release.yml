@@ -141,6 +141,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      pull-requests: write
+      issues: write
     uses: ./.github/workflows/docker.yml
     with:
       ref: v${{ needs.version-bump.outputs.version }}

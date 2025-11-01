@@ -25,7 +25,7 @@ jobs:
   # Check if comment trigger is valid
   check-trigger:
     name: Check Trigger
-    if: always()
+    if: github.event_name == 'issue_comment'
     runs-on: ubuntu-latest
     outputs:
       triggered: ${{ steps.check.outputs.triggered || 'false' }}
@@ -115,9 +115,11 @@ jobs:
     name: Build Docker Images
     runs-on: ubuntu-latest
     if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call' ||
-      (github.event_name == 'issue_comment' && needs.check-trigger.outputs.triggered == 'true')
+      always() && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'workflow_call' ||
+        (github.event_name == 'issue_comment' && needs.check-trigger.outputs.triggered == 'true')
+      )
     needs: [check-trigger]
     permissions:
       contents: read
