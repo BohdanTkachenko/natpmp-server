@@ -14,7 +14,7 @@ RUN cargo build --release --target $RUST_TARGET_TRIPLE && \
     strip natpmp-server && \
     chmod +x natpmp-server 
 
-FROM alpine:3.21
+FROM alpine:3.22
 
 WORKDIR /app
 COPY --from=builder /build/natpmp-server .
