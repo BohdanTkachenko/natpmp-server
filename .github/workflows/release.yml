@@ -86,20 +86,20 @@ jobs:
 
         cargo check
 
-    - name: Commit version changes
+    - name: Commit and push version changes
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
 
         git add Cargo.toml Cargo.lock
-        git commit -m "chore: bump version to v${{ steps.new-version.outputs.version }}"
 
-    - name: Upload git repository state
-      uses: actions/upload-artifact@v4
-      with:
-        name: git-repo
-        path: .git
-        retention-days: 1
+        # Check if there are changes to commit
+        if git diff --staged --quiet; then
+          echo "No changes to commit - version already bumped"
+        else
+          git commit -m "chore: bump version to v${{ steps.new-version.outputs.version }}"
+          git push origin main
+        fi
 
   rust:
     name: Build Release Assets
@@ -108,8 +108,8 @@ jobs:
       contents: read
     uses: ./.github/workflows/rust.yml
 
-  push-and-tag:
-    name: Push Commit and Tag
+  create-tag:
+    name: Create Release Tag
     needs: [version-bump, rust]
     runs-on: ubuntu-latest
     permissions:
@@ -118,26 +118,36 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
-
-    - name: Download git repository state
-      uses: actions/download-artifact@v4
       with:
-        name: git-repo
-        path: .git
+        ref: main
+        fetch-depth: 0
 
-    - name: Push commit and create tag
+    - name: Create and push tag
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
 
-        git push origin main
+        TAG="v${{ needs.version-bump.outputs.version }}"
 
-        git tag -a "v${{ needs.version-bump.outputs.version }}" -m "Release v${{ needs.version-bump.outputs.version }}"
-        git push origin "v${{ needs.version-bump.outputs.version }}"
+        # Check if tag already exists locally
+        if git rev-parse "$TAG" >/dev/null 2>&1; then
+          echo "Tag $TAG already exists locally, deleting it"
+          git tag -d "$TAG"
+        fi
+
+        # Check if tag exists on remote
+        if git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
+          echo "Tag $TAG already exists on remote, deleting it"
+          git push origin --delete "$TAG"
+        fi
+
+        # Create and push new tag
+        git tag -a "$TAG" -m "Release $TAG"
+        git push origin "$TAG"
 
   docker:
     name: Build and Push Docker Images
-    needs: [version-bump, push-and-tag]
+    needs: [version-bump, create-tag]
     permissions:
       contents: read
       packages: write
