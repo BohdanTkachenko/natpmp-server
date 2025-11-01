@@ -108,9 +108,21 @@ jobs:
       contents: read
     uses: ./.github/workflows/rust.yml
 
+  docker:
+    name: Build and Push Docker Images
+    needs: [version-bump, rust]
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      ref: main
+
   create-tag:
     name: Create Release Tag
-    needs: [version-bump, rust]
+    needs: [version-bump, rust, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,18 +156,6 @@ jobs:
         # Create and push new tag
         git tag -a "$TAG" -m "Release $TAG"
         git push origin "$TAG"
-
-  docker:
-    name: Build and Push Docker Images
-    needs: [version-bump, create-tag]
-    permissions:
-      contents: read
-      packages: write
-      pull-requests: write
-      issues: write
-    uses: ./.github/workflows/docker.yml
-    with:
-      ref: main
 
   release:
     name: Create Release
